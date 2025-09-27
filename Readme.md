@@ -1,18 +1,87 @@
-Turning your self-hosted setup into a **TON Web Gateway-as-a-Service** for Web2 domains is a perfect extension of the ETN Ecosystem. It's completely achievable because of the flexibility of the reverse proxy (like Caddy or Nginx) and how the TON Proxy handles routing.
 
-The core challenge changes from routing traffic to your **internal** LXCs to routing traffic to **external Web2 domains** on the public internet.
 
-Here is the process for how your proposed service would work, maintaining your self-hosting principles:
+You can run the necessary TON Proxy component in its own LXC container and configure it to work alongside or in front of your existing Caddy setup to serve multiple apps via different TON domains.
+
+Here's the breakdown of how to adapt your self-hosted architecture for the TON Network:
 
 -----
 
-## The Key to Routing External Web2 Sites
+## 1\. The Core Concept: A Two-Part Reverse Proxy
 
-The mechanism remains the same: **Name-Based Virtual Hosting**.
+Your existing setup already uses a reverse proxy chain, and we'll essentially be adding a new layer on the TON side.
 
-1.  **TON DNS:** Each customer's new `.ton` domain (e.g., `customer-shop.ton`) is configured to point to your **single, public ADNL address** on the TON Network.
-2.  **TON Proxy (Your LXC):** When a user visits `customer-shop.ton`, the request arrives at your TON Proxy LXC. It validates the ADNL connection, extracts the original host header (`customer-shop.ton`), and passes it to your Caddy Reverse Proxy.
-3.  **Caddy Configuration (The Crux):** This is where you configure the specific routing for each customer's external URL.
+  * **TON Layer (RLDP → HTTP):** This will be a new LXC container running the **TON Proxy** application (`rldp-http-proxy` or an alternative like `tonutils-reverse-proxy`). Its job is to listen for TON Network requests (RLDP/ADNL) and convert them into standard HTTP requests.
+  * **Existing Caddy Layer (HTTP → Internal Apps):** This is your current Caddy LXC. The TON Proxy will forward the new HTTP requests to this Caddy instance. Caddy will then route them to the correct internal LXC based on the domain name, just like it does for the regular internet.
+
+-----
+
+## 2\. Setup the Dedicated TON Proxy LXC
+
+You should create a new LXC container to run the TON-specific reverse proxy component. Given your existing setup, this keeps the TON network-facing software isolated.
+
+### A. TON Proxy Configuration
+
+1.  **Install the Proxy:** Download and install the TON reverse proxy software (e.g., `rldp-http-proxy` or `tonutils-reverse-proxy`) inside the new LXC container.
+
+2.  **Generate ADNL Address:** Generate a persistent **ADNL address** for this LXC. This single address is what all of your TON domains (`app1.ton`, `app2.ton`, etc.) will point to via TON DNS.
+
+3.  **Run in Reverse Mode:** Configure the proxy to run in **reverse mode**. Instead of forwarding to a single web server on `127.0.0.1:80`, you'll set it up to forward all incoming TON requests to your existing Caddy LXC.
+
+      * For the standard `rldp-http-proxy`, you'd use the `-R` flag to point to your Caddy container's **internal IP** and **port** (likely port 80/443, or whatever Caddy is listening on internally for the LAN).
+
+    **Example Command (Conceptual):**
+
+    ```bash
+    # Replace <CADDY_LXC_IP> with the internal network IP of your Caddy LXC
+    rldp-http-proxy -a <your-public-ip>:3333 -R '*'@<CADDY_LXC_IP>:80 -C global.config.json -A <your-adnl-address> -d
+    ```
+
+### B. DNS Setup
+
+1.  **Register Domains:** Acquire the `.ton` domains you need (e.g., `etn-app1.ton`, `etn-app2.ton`).
+2.  **Create Site Records:** For *each* `.ton` domain, you must register a **site record** via TON DNS that points to the **single ADNL address** of your new TON Proxy LXC.
+
+-----
+
+## 3\. Configure Your Existing Caddy LXC
+
+This is the most critical step for handling the multiple TON domains. Your Caddy configuration needs to recognize and respond to the `.ton` domains when they arrive as HTTP requests from the TON Proxy LXC.
+
+Since the TON Proxy converts the RLDP/ADNL request into a standard HTTP request, the **Host header** will be preserved. This means the request that hits your Caddy instance will look like this:
+
+`GET / HTTP/1.1`
+`Host: etn-app1.ton`
+`...`
+
+### Caddy Configuration
+
+In your `Caddyfile` on the Caddy LXC, you simply add server blocks for the new TON domains and proxy them to their corresponding internal LXC containers (apps).
+
+```caddy
+# This is where the request from the regular internet comes in
+# your.main-domain.com {
+#   reverse_proxy 10.0.0.X:8080 
+#   ...
+# }
+
+# NEW: Configuration for TON Site 1
+# This will be routed from the TON Proxy LXC based on the Host header
+etn-app1.ton {
+    # Point to the internal IP and port of the LXC running App 1
+    reverse_proxy 10.0.0.11:80
+}
+
+# NEW: Configuration for TON Site 2
+# (The TON Proxy LXC sends all TON traffic to Caddy, Caddy decides where to route it)
+etn-app2.ton {
+    # Point to the internal IP and port of the LXC running App 2
+    reverse_proxy 10.0.0.12:443  # Example: if App 2 uses HTTPS internally
+}
+```
+
+By using the TON Proxy to forward all requests to your existing Caddy instance, you leverage Caddy's built-in **Virtual Host** capability to route multiple distinct `.ton` domains to all your different self-hosted applications.
+
+This setup keeps your core **self-hosting** principle intact: everything is run and managed on your own Proxmox environment, with the TON component isolated in its own container.3.  **Caddy Configuration (The Crux):** This is where you configure the specific routing for each customer's external URL.
 
 The only difference is that your Caddy config will use an **external, public Web2 domain** as the backend target instead of a local LXC IP address.
 
